@@ -140,6 +140,14 @@ const LS={get:k=>{try{return JSON.parse(localStorage.getItem(k))}catch(e){return
 let SESS=LS.get("hp-session"),DEV=LS.get("hp-device")||{useTestDate:false,testDate:""};
 let CACHE=LS.get("hp-cache")||{data:null,version:null,dirty:false};
 let SYNC={state:"",msg:""},pushTimer=null,pushing=false,EMPTY_SERVER=false;
+let MARKET=LS.get("hp-market")||{};
+function mkBond(b){const id=(b.isin||"").trim().toUpperCase();return id&&MARKET.bonds&&MARKET.bonds[id]||null}
+function applyMarket(st){ // дополняем облигации датами погашения и оферт с MOEX
+  const t0=iso(new Date(Date.now()-30*864e5));
+  for(const b of (st.placements||[]))if(b.type==="bond"){const m=mkBond(b);if(!m)continue;
+    if(m.maturity)b.maturity=m.maturity;
+    const fut=(m.offers||[]).filter(d=>d>=t0);b.offers=[...new Set([...(b.offers||[]),...fut])].sort()}}
+async function loadMarket(){try{const r=await rest("market?select=key,data");MARKET=Object.fromEntries((r||[]).map(x=>[x.key,x.data]));LS.set("hp-market",MARKET);applyMarket(S)}catch(e){}}
 const saveDev=()=>LS.set("hp-device",DEV);
 function emptyState(){return{v:1,settings:{usdRate:90,keyRates:[{from:"2025-01-01",value:15.5}]},placements:[],events:[],acks:{}}}
 function normalize(d){d=d&&typeof d==="object"?d:emptyState();d.settings=d.settings||{};d.settings.usdRate=d.settings.usdRate||90;d.settings.keyRates=d.settings.keyRates&&d.settings.keyRates.length?d.settings.keyRates:[{from:"2025-01-01",value:15.5}];
@@ -181,24 +189,46 @@ async function pull(){if(!SESS||pushing||dlg.open)return;if(CACHE.dirty)return p
   try{const r=await rest(`family_state?id=eq.${ROW}&select=data,version`);const row=r&&r[0];
     if(!row){EMPTY_SERVER=true;CACHE.version=null;setSync("ok","на сервере пока нет данных");render();return}
     EMPTY_SERVER=false;
-    if(row.version!==CACHE.version){CACHE={data:row.data,version:row.version,dirty:false};LS.set("hp-cache",CACHE);S=normalize(row.data);render()}
+    if(row.version!==CACHE.version){CACHE={data:row.data,version:row.version,dirty:false};LS.set("hp-cache",CACHE);S=normalize(row.data)}
+    await loadMarket();render();
     setSync("ok","синхронизировано")}catch(e){if(!e.auth)setSync("error","сервер недоступен — данные с устройства")}}
+const PUSH_OK=()=>"serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window;
+function b64u(s){const p="=".repeat((4-s.length%4)%4),b=atob((s+p).replace(/-/g,"+").replace(/_/g,"/"));return Uint8Array.from(b,c=>c.charCodeAt(0))}
+function deviceName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone/iPad":/Mac/.test(u)?"Mac":/Windows/.test(u)?"Windows":/Android/.test(u)?"Android":"устройство";
+  const br=/Edg\//.test(u)?"Edge":/Chrome\//.test(u)?"Chrome":/Safari\//.test(u)?"Safari":/Firefox\//.test(u)?"Firefox":"браузер";return os+" · "+br}
+async function pushStatus(){if(!PUSH_OK())return"unsupported";if(Notification.permission==="denied")return"denied";
+  const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();return sub?"on":"off"}
+async function pushEnable(){const key=MARKET.vapid&&MARKET.vapid.publicKey;if(!key)throw new Error("На сервере ещё нет ключа уведомлений: один раз запустите задачу «Ежедневная рассылка» в GitHub (режим test).");
+  const perm=await Notification.requestPermission();if(perm!=="granted")throw new Error("Уведомления не разрешены в браузере.");
+  const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
+  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(key)});
+  const j=sub.toJSON();await rest("push_subscriptions?on_conflict=endpoint",{method:"POST",headers:{Prefer:"resolution=merge-duplicates"},body:JSON.stringify({user_id:SESS.user.id,endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,device:deviceName()})})}
+async function pushDisable(){const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();if(!sub)return;
+  try{await rest("push_subscriptions?endpoint=eq."+encodeURIComponent(sub.endpoint),{method:"DELETE"})}catch(e){}await sub.unsubscribe()}
+async function pushLocalTest(){const reg=await navigator.serviceWorker.ready;await reg.showNotification("Планер: проверка",{body:"Браузер показывает уведомления этого приложения.",tag:"local-test"})}
+function updateBadge(){try{const n=mustCount();if(navigator.setAppBadge){n?navigator.setAppBadge(n):navigator.clearAppBadge()}}catch(e){}}
 function downloadFile(name,text,mime){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type:mime}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)}
 /* ========== test data: срез на февраль 2026 ========== */
 /* ========== engine ========== */
 const realToday=()=>iso(new Date(Date.now()+3*3600e3)); // московская дата
 const today=()=>DEV.useTestDate&&DEV.testDate?DEV.testDate:realToday();
 const P=id=>S.placements.find(p=>p.id===id);
-function KS(d){const k=[...S.settings.keyRates].sort((a,b)=>a.from<b.from?-1:1);let v=k[0]?k[0].value:0;for(const e of k)if(e.from<=d)v=e.value;return v}
+function allKeyRates(){const auto=(MARKET.rates&&MARKET.rates.keyRates)||[];if(!auto.length)return S.settings.keyRates;
+  const last=auto.reduce((m,x)=>x.from>m?x.from:m,"");return[...auto,...S.settings.keyRates.filter(x=>x.from>last)]}
+function KS(d){const k=[...allKeyRates()].sort((a,b)=>a.from<b.from?-1:1);let v=k[0]?k[0].value:0;for(const e of k)if(e.from<=d)v=e.value;return v}
 const tEnd=t=>t.target||t.end||null;
 function rateEntry(t,d){const r=[...t.rates].sort((a,b)=>a.from<b.from?-1:1);let e=r[0];for(const x of r)if(x.from<=d)e=x;return e}
 function rateAt(t,d){const e=rateEntry(t,d);if(!e)return 0;if(e.kind==="ks")return KS(d)+e.spread;if(e.kind==="sav")return e.value+(KS(d)-KS(e.from));return e.value}
 function rateIsEst(t,d){const e=rateEntry(t,d);return e&&e.kind==="sav"&&KS(d)!==KS(e.from)}
 function amountAt(p,t,d){let a=t.amount;for(const o of p.ops)if(o.trancheId===t.id&&o.date<=d)a+=o.kind==="topup"?o.amount:-o.amount;return a}
 function activeTranche(p,d){return p.tranches.find(t=>t.incomplete&&!t.open?(!t.closed||d<t.closed.date):(t.open<=d&&(!tEnd(t)||d<tEnd(t))&&!(t.closed&&t.closed.date<=d)))}
-function fx(p){return p.currency==="USD"?S.settings.usdRate:1}
+function usdRate(){return(MARKET.rates&&MARKET.rates.usd&&MARKET.rates.usd.rate)||S.settings.usdRate}
+function fx(p){return p.currency==="USD"?usdRate():1}
 function qtyAt(b,d){let q=b.qty0;for(const o of b.ops)if(o.date<=d)q+=o.kind==="buy"?o.qty:-o.qty;return q}
 function couponSchedule(b){
+  const m=mkBond(b);if(m&&m.coupons&&m.coupons.length){let last=null;const out=[];
+    for(const c of [...m.coupons].sort((x,y)=>x.date<y.date?-1:1)){if(c.value!=null)last=c.value;const v=c.value!=null?c.value:(last!=null?last:(b.coupons[0]&&b.coupons[0].perBond)||0);out.push({date:c.date,perBond:v,est:c.value==null})}
+    return out.filter(x=>!b.maturity||x.date<=b.maturity)}
   const c=[...b.coupons].sort((x,y)=>x.date<y.date?-1:1);if(!c.length)return c;
   const out=c.map(x=>({...x}));let last=out[out.length-1];const step=12/b.freq;
   const lim=b.maturity||addMonths(last.date,48);let d=addMonths(last.date,step);
@@ -317,7 +347,7 @@ function portfolio(D){
 "use strict";
 /* ========== UI state ========== */
 const V={view:"events",pDate:"",cDate:"",group:"type",fYear:""};
-function render(){if(!SESS){renderLogin();return}renderHead();({events:vEvents,portfolio:vPortfolio,forecast:vForecast,settings:vSettings})[V.view]();}
+function render(){if(!SESS){renderLogin();return}renderHead();updateBadge();({events:vEvents,portfolio:vPortfolio,forecast:vForecast,settings:vSettings})[V.view]();}
 function renderHead(){
   const c=mustCount();
   $("#nav").innerHTML=[["events","События"],["portfolio","Портфель"],["forecast","Прогноз"],["settings","Настройки"]].map(([k,l])=>`<button data-v="${k}" ${V.view===k?'aria-current="page"':""}>${l}${k==="events"&&c?` <span class="badge" title="Неподтверждённые обязательные">${c}</span>`:""}</button>`).join("");
@@ -454,11 +484,12 @@ function vSettings(){
   const s=S.settings,ks=[...s.keyRates].sort((a,b)=>a.from<b.from?-1:1);
   $("#main").innerHTML=`<h1>Настройки</h1><p class="lead">Данные хранятся на сервере и видны на всех ваших устройствах. Копия есть и на этом устройстве — для работы без сети.</p>
   <div class="grid2"><div style="display:flex;flex-direction:column;gap:16px">
-  <div class="panel"><h3>Ключевая ставка ЦБ</h3><p class="muted" style="margin:0 0 8px;font-size:13px">Новое значение пересчитывает плавающие ставки и оценки по накопительным счетам.</p>
+  <div class="panel"><h3>Ключевая ставка ЦБ</h3><p class="muted" style="margin:0 0 8px;font-size:13px">${MARKET.rates&&MARKET.rates.keyRates&&MARKET.rates.keyRates.length?`Подгружается автоматически с сайта ЦБ: сейчас <b>${pct(KS(today()))}</b>, обновлено ${fd((MARKET.rates.updatedAt||"").slice(0,10))}. Вручную добавляйте ставку, только если автоподгрузка отстала.`:"Автоподгрузка ещё не работала — пока используется ручная таблица."} Новое значение пересчитывает плавающие ставки и оценки по накопительным счетам.</p>
   <table><thead><tr><th>С даты</th><th class="n">Ставка</th><th></th></tr></thead><tbody>${ks.map((k,i)=>`<tr><td>${fd(k.from)}</td><td class="n">${pct(k.value)}</td><td>${ks.length>1?`<button class="btn" onclick="A.ksDel(${S.settings.keyRates.indexOf(k)})">Удалить</button>`:""}</td></tr>`).join("")}</tbody></table>
   <div class="controls" style="margin:10px 0 0"><input type="date" id="ksd" value="${today()}"><input type="number" step="0.25" id="ksv" placeholder="%" style="width:80px"><button class="btn primary" id="ksa">Добавить</button></div></div>
-  <div class="panel"><h3>Курс доллара для оценки купонов</h3><div class="controls" style="margin:0"><input type="number" step="0.01" id="usd" value="${s.usdRate}" style="width:100px"> ₽ за $ <button class="btn" id="usds">Сохранить</button></div></div>
+  <div class="panel"><h3>Курс доллара для оценки купонов</h3>${MARKET.rates&&MARKET.rates.usd?`<p class="muted" style="margin:0 0 8px;font-size:13px">Автоматически по курсу ЦБ: <b>${MARKET.rates.usd.rate.toLocaleString("ru-RU")} ₽</b> на ${fd(MARKET.rates.usd.date)}. Поле ниже — запасное значение.</p>`:""}<div class="controls" style="margin:0"><input type="number" step="0.01" id="usd" value="${s.usdRate}" style="width:100px"> ₽ за $ <button class="btn" id="usds">Сохранить</button></div></div>
   <div class="panel"><h3>Дата «сегодня»</h3><label><input type="checkbox" id="ut" ${DEV.useTestDate?"checked":""}> Тестовый режим: задавать дату вручную (в шапке). Действует только на этом устройстве.</label></div>
+  <div class="panel"><h3>Уведомления на этом устройстве</h3><p id="pst" class="muted" style="margin:0 0 8px;font-size:13px">Проверяю…</p><div class="controls" style="margin:0" id="pbtns"></div><div id="pmsg" class="err"></div></div>
   <div class="panel"><h3>Вход</h3><p style="margin:0 0 8px">Вы вошли как <b>${esc(SESS.user.email)}</b></p><button class="btn" id="lo">Выйти</button></div>
   </div><div style="display:flex;flex-direction:column;gap:16px">
   <div class="panel"><h3>Резервная копия</h3><p class="muted" style="margin:0 0 10px;font-size:13px">«Выгрузить» сохраняет все данные в файл в папку «Загрузки». «Загрузить» заменяет текущие данные данными из файла.</p>
@@ -470,6 +501,13 @@ function vSettings(){
   $("#usds").onclick=()=>{const v=parseFloat($("#usd").value);if(v>0){s.usdRate=v;save();render()}};
   $("#ut").onchange=e=>{DEV.useTestDate=e.target.checked;if(!DEV.testDate)DEV.testDate=realToday();saveDev();render()};
   $("#lo").onclick=signOut;
+  (async()=>{const st=await pushStatus(),ios=/iPhone|iPad/.test(navigator.userAgent)&&!navigator.standalone&&!matchMedia("(display-mode: standalone)").matches;
+    const T={unsupported:ios?"На iPhone уведомления работают только после установки на экран «Домой»: «Поделиться» → «На экран Домой».":"Этот браузер не поддерживает push-уведомления.",denied:"Уведомления запрещены в настройках браузера для этого сайта. Разрешите их там и обновите страницу.",off:"Выключены. Включите, чтобы получать обязательные напоминания и утреннюю сводку в 09:00 по Москве.",on:"Включены. Напоминания и утренняя сводка приходят в 09:00 по Москве."};
+    $("#pst").textContent=T[st];const B=$("#pbtns");const msg=m=>{$("#pmsg").textContent=m};
+    if(st==="off")B.innerHTML=`<button class="btn primary" id="pon">Включить уведомления</button>`;
+    if(st==="on")B.innerHTML=`<button class="btn" id="ptest">Проверить на этом устройстве</button><button class="btn" id="poff">Выключить</button>`;
+    const run=f=>async()=>{msg("");try{await f();vSettings()}catch(e){msg(e.message||String(e))}};
+    if($("#pon"))$("#pon").onclick=run(pushEnable);if($("#poff"))$("#poff").onclick=run(pushDisable);if($("#ptest"))$("#ptest").onclick=run(pushLocalTest)})();
   const setMsg=m=>{$("#dlmsg").textContent=m};
   $("#dl").onclick=()=>{const name="vklady-"+realToday()+".json";downloadFile(name,JSON.stringify(S,null,1),"application/json");setMsg("Файл "+name+" сохранён в «Загрузки».")};
   $("#ul").onclick=()=>$("#ulf").click();
@@ -605,7 +643,7 @@ const A={
       if(at)acts=`<button class="btn primary" onclick="A.closeActive('${pid}','${at.id}')">Закрыть или забрать часть</button>`+(p.type==="savings"?`<button class="btn" onclick="A.rateNew('${pid}')">Новая ставка</button>`:"")+`<button class="btn" onclick="A.op('${pid}','topup')">Пополнить</button><button class="btn" onclick="A.editTranche('${pid}','${at.id}')">Изменить данные</button>`;
       else{const le=lastEnded(p,t0);if(le&&!(le.t.closed&&(le.t.closed.answer||le.t.closed.via==="prolong")))acts=le.t.closed?`<button class="btn primary" onclick="A.money('${pid}','${le.t.id}')">Что стало с деньгами</button>`:(p.type==="deposit"?`<button class="btn primary" onclick="A.prolong('${pid}','${le.t.id}')">Пролонгирован</button>`:"")+`<button class="btn" onclick="A.closeEnd('${pid}','${le.t.id}',1)">Закрыт</button>`}
     }else{const sch=couponSchedule(p).filter(c=>c.date>=t0).slice(0,6);
-      body=`<p style="margin-top:0">${p.owner} · ${num(qtyAt(p,t0))} шт. × ${p.nominal} ${p.currency==="USD"?"USD":"₽"}${p.isin?" · ISIN "+esc(p.isin):""}<br>Погашение: ${fd(p.maturity)}${p.offers.length?" · оферта "+p.offers.map(fd).join(", "):""}${p.floating?" · плавающий купон":""}${p.closed?`<br><b>Закрыта ${fd(p.closed.date)}</b>`:""}${p.notes?`<br><span class="muted">${esc(p.notes)}</span>`:""}</p>
+      body=`<p style="margin-top:0">${p.owner} · ${num(qtyAt(p,t0))} шт. × ${p.nominal} ${p.currency==="USD"?"USD":"₽"}${p.isin?" · ISIN "+esc(p.isin):""}<br>${mkBond(p)?`<span class="new">Данные MOEX подгружены ${fd((mkBond(p).updatedAt||"").slice(0,10))}</span><br>`:p.isin?`<span class="chg">ISIN указан — данные MOEX появятся после ближайшей ежедневной задачи</span><br>`:`<span class="chg">Укажите ISIN («Изменить»), чтобы купоны подгружались с MOEX</span><br>`}Погашение: ${fd(p.maturity)}${p.offers.length?" · оферта "+p.offers.map(fd).join(", "):""}${p.floating?" · плавающий купон":""}${p.closed?`<br><b>Закрыта ${fd(p.closed.date)}</b>`:""}${p.notes?`<br><span class="muted">${esc(p.notes)}</span>`:""}</p>
       <h3 style="font-size:14px;margin:12px 0 4px">Ближайшие купоны</h3><ul>${sch.map(c=>`<li>${fd(c.date)}: ${c.perBond} ${p.currency==="USD"?"USD":"₽"} × ${num(qtyAt(p,c.date))} ≈ <span class="amt">${money(c.perBond*qtyAt(p,c.date)*fx(p))}</span>${c.est||p.floating?" (оценка)":""}</li>`).join("")||"<li>нет данных</li>"}</ul>
       ${p.ops.length?`<h3 style="font-size:14px;margin:12px 0 4px">Операции</h3><ul>${p.ops.map(o=>`<li>${fd(o.date)}: ${o.kind==="buy"?"покупка":"продажа"} ${num(o.qty)} шт.</li>`).join("")}</ul>`:""}`;
       if(p.closed&&!p.closed.answer)acts=`<button class="btn primary" onclick="A.money('${pid}','')">Что стало с деньгами</button>`;
@@ -616,7 +654,7 @@ const A={
     modal(p.name||p.bank,body,null)}
 };
 /* ========== init ========== */
-S=normalize(CACHE.data||emptyState());render();
+S=normalize(CACHE.data||emptyState());applyMarket(S);render();
 if(SESS)pull();
 setInterval(()=>{if(SESS)pull()},60000);
 window.addEventListener("focus",()=>{if(SESS)pull()});
