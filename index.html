@@ -205,7 +205,7 @@ async function pushEnable(){const key=MARKET.vapid&&MARKET.vapid.publicKey;if(!k
   const j=sub.toJSON();await rest("push_subscriptions?on_conflict=endpoint",{method:"POST",headers:{Prefer:"resolution=merge-duplicates"},body:JSON.stringify({user_id:SESS.user.id,endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,device:deviceName()})})}
 async function pushDisable(){const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();if(!sub)return;
   try{await rest("push_subscriptions?endpoint=eq."+encodeURIComponent(sub.endpoint),{method:"DELETE"})}catch(e){}await sub.unsubscribe()}
-async function pushLocalTest(){const reg=await navigator.serviceWorker.ready;await reg.showNotification("Планер: проверка",{body:"Браузер показывает уведомления этого приложения.",tag:"local-test"})}
+async function pushLocalTest(){const reg=await navigator.serviceWorker.ready;await reg.showNotification("Планер: проверка",{body:"Браузер показывает уведомления этого приложения ("+new Date().toLocaleTimeString("ru-RU")+").",tag:"local-test",renotify:true})}
 function updateBadge(){try{const n=mustCount();if(navigator.setAppBadge){n?navigator.setAppBadge(n):navigator.clearAppBadge()}}catch(e){}}
 function downloadFile(name,text,mime){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type:mime}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000)}
 /* ========== test data: срез на февраль 2026 ========== */
@@ -277,7 +277,7 @@ function buildEvents(t0,horizon=60){
       if(p.type==="savings"){const t=p.tranches.find(x=>!x.closed);if(t){let d=monthStart(addMonths(t0,0));if(d<t0)d=addMonths(d,1);for(;d<=to;d=addMonths(d,1)){const key="chk:"+p.id+":"+d.slice(0,7);if(S.acks[key])continue;L.push({cls:"info",kind:"chk",key,date:d,p,t,title:"Проверить ставку: "+p.bank,sub:"В приложении: "+pct(rateAt(t,d))+(rateIsEst(t,d)?" (оценка от КС)":"")})}}}
     }else if(!p.closed){
       for(const c of couponSchedule(p))if(c.date>=t0&&c.date<=to&&qtyAt(p,c.date)>0)L.push({cls:"info",kind:"cpn",date:c.date,p,amount:c.perBond*qtyAt(p,c.date)*fx(p),title:"Купон: "+p.name,sub:num(qtyAt(p,c.date))+" шт. × "+c.perBond+(p.currency==="USD"?" USD":" ₽")+(c.est||p.floating?" · сумма оценочная":"")});
-      for(const o of p.offers){const key="offer:"+p.id+":"+o;M({kind:"offer",key,date:o,p,st:mState(o,key,t0),title:"Оферта: "+p.name,sub:"Решите: оставить или предъявить к выкупу"})}
+      for(const o of p.offers){const key="offer:"+p.id+":"+o,d=addDays(o,-7);M({kind:"offer",key,date:d,p,st:mState(d,key,t0),title:"Оферта "+fd(o)+": "+p.name,sub:"Решите: оставить или предъявить к выкупу. Заявку брокеру обычно подают за 5–10 дней до оферты"})}
       if(p.maturity){const key="mat:"+p.id;M({kind:"mat",key,date:p.maturity,p,st:mState(p.maturity,key,t0),title:"Погашение: "+p.name,sub:money(qtyAt(p,p.maturity)*p.nominal*fx(p))})}
     }else if(!p.closed.answer){const key="money:"+p.id,d=addDays(p.closed.date,3);M({kind:"money",key,date:d,p,st:moneyState(d,key,t0),title:"Что стало с деньгами? "+p.name,sub:"Погашена/продана "+fd(p.closed.date)+" · "+money(qtyAt(p,p.closed.date)*p.nominal*fx(p))})}
   }
