@@ -405,8 +405,10 @@ function notifToday(t0){
 }
 function vEvents(){
   const t0=today(),L=buildEvents(t0);
+  const js=MARKET.jobstatus,stale=js&&js.lastDailyDate&&js.lastDailyDate<addDays(realToday(),-1);
+  const staleHint=stale?`<div class="panel" style="margin-bottom:14px;border-color:var(--must);background:var(--must-bg)"><b>Сервер напоминаний не запускался с ${fd(js.lastDailyDate)}.</b> Утренние уведомления могут не приходить — сообщите Сергею. Все события по-прежнему видны здесь, в ленте.</div>`:"";
   const emptyHint=!S.placements.length?`<div class="panel" style="margin-bottom:14px;border-color:var(--wait)"><b>Данных пока нет.</b> Если это первый вход — загрузите файл выгрузки из прототипа: <a href="#" onclick="V.view='settings';render();return false">Настройки → Загрузить из файла</a>.</div>`:"";
-  $("#main").innerHTML=`${emptyHint}<div class="grid2"><div><h1>Ближайшие события</h1><p class="lead">${MOBILE?"Только просмотр. Отмечать «сделано» — на Mac.":"Обязательные — сверху, пока не отмечено, что сделано. Остальное на 60 дней вперёд."}</p>
+  $("#main").innerHTML=`${staleHint}${emptyHint}<div class="grid2"><div><h1>Ближайшие события</h1><p class="lead">${MOBILE?"Только просмотр. Отмечать «сделано» — на Mac.":"Обязательные — сверху, пока не отмечено, что сделано. Остальное на 60 дней вперёд."}</p>
   <div class="panel" style="padding:4px 16px">${L.length?`<ul class="tl">${L.map(e=>evItem(e,t0)).join("")}</ul>`:`<div class="empty">На ближайшие 60 дней событий нет.</div>`}</div></div>
   ${MOBILE?"":`<aside style="display:flex;flex-direction:column;gap:14px;margin-top:8px">
   <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="A.newPlacement()">Добавить размещение</button><button class="btn" onclick="A.newEvent()">Добавить событие</button></div>
