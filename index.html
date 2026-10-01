@@ -192,17 +192,22 @@ async function pull(){if(!SESS||pushing||dlg.open)return;if(CACHE.dirty)return p
     if(row.version!==CACHE.version){CACHE={data:row.data,version:row.version,dirty:false};LS.set("hp-cache",CACHE);S=normalize(row.data)}
     await loadMarket();render();
     setSync("ok","синхронизировано")}catch(e){if(!e.auth)setSync("error","сервер недоступен — данные с устройства")}}
+const MOBILE=/iPhone|iPod|Android/i.test(navigator.userAgent); // на телефоне — только просмотр ленты событий
 const PUSH_OK=()=>"serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window;
 function b64u(s){const p="=".repeat((4-s.length%4)%4),b=atob((s+p).replace(/-/g,"+").replace(/_/g,"/"));return Uint8Array.from(b,c=>c.charCodeAt(0))}
 function deviceName(){const u=navigator.userAgent;const os=/iPhone|iPad/.test(u)?"iPhone/iPad":/Mac/.test(u)?"Mac":/Windows/.test(u)?"Windows":/Android/.test(u)?"Android":"устройство";
   const br=/Edg\//.test(u)?"Edge":/Chrome\//.test(u)?"Chrome":/Safari\//.test(u)?"Safari":/Firefox\//.test(u)?"Firefox":"браузер";return os+" · "+br}
 async function pushStatus(){if(!PUSH_OK())return"unsupported";if(Notification.permission==="denied")return"denied";
   const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();return sub?"on":"off"}
-async function pushEnable(){const key=MARKET.vapid&&MARKET.vapid.publicKey;if(!key)throw new Error("На сервере ещё нет ключа уведомлений: один раз запустите задачу «Ежедневная рассылка» в GitHub (режим test).");
+async function pushEnable(level){const key=MARKET.vapid&&MARKET.vapid.publicKey;if(!key)throw new Error("На сервере ещё нет ключа уведомлений: один раз запустите задачу «Ежедневная рассылка» в GitHub (режим test).");
   const perm=await Notification.requestPermission();if(perm!=="granted")throw new Error("Уведомления не разрешены в браузере.");
   const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
   if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(key)});
-  const j=sub.toJSON();await rest("push_subscriptions?on_conflict=endpoint",{method:"POST",headers:{Prefer:"resolution=merge-duplicates"},body:JSON.stringify({user_id:SESS.user.id,endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,device:deviceName()})})}
+  const j=sub.toJSON();await rest("push_subscriptions?on_conflict=endpoint",{method:"POST",headers:{Prefer:"resolution=merge-duplicates"},body:JSON.stringify({user_id:SESS.user.id,endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,device:deviceName(),level:level||"all"})})}
+async function pushLevel(){const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();if(!sub)return null;
+  const r=await rest("push_subscriptions?select=level&endpoint=eq."+encodeURIComponent(sub.endpoint));return r&&r[0]?r[0].level:"all"}
+async function pushSetLevel(level){const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();if(!sub)return;
+  await rest("push_subscriptions?endpoint=eq."+encodeURIComponent(sub.endpoint),{method:"PATCH",body:JSON.stringify({level})})}
 async function pushDisable(){const reg=await navigator.serviceWorker.getRegistration();const sub=reg&&await reg.pushManager.getSubscription();if(!sub)return;
   try{await rest("push_subscriptions?endpoint=eq."+encodeURIComponent(sub.endpoint),{method:"DELETE"})}catch(e){}await sub.unsubscribe()}
 async function pushLocalTest(){const reg=await navigator.serviceWorker.ready;await reg.showNotification("Планер: проверка",{body:"Браузер показывает уведомления этого приложения ("+new Date().toLocaleTimeString("ru-RU")+").",tag:"local-test",renotify:true})}
@@ -350,7 +355,8 @@ const V={view:"events",pDate:"",cDate:"",group:"type",fYear:""};
 function render(){if(!SESS){renderLogin();return}renderHead();updateBadge();({events:vEvents,portfolio:vPortfolio,forecast:vForecast,settings:vSettings})[V.view]();}
 function renderHead(){
   const c=mustCount();
-  $("#nav").innerHTML=[["events","События"],["portfolio","Портфель"],["forecast","Прогноз"],["settings","Настройки"]].map(([k,l])=>`<button data-v="${k}" ${V.view===k?'aria-current="page"':""}>${l}${k==="events"&&c?` <span class="badge" title="Неподтверждённые обязательные">${c}</span>`:""}</button>`).join("");
+  if(MOBILE&&!["events","settings"].includes(V.view))V.view="events";
+  $("#nav").innerHTML=(MOBILE?[["events","События"],["settings","Настройки"]]:[["events","События"],["portfolio","Портфель"],["forecast","Прогноз"],["settings","Настройки"]]).map(([k,l])=>`<button data-v="${k}" ${V.view===k?'aria-current="page"':""}>${l}${k==="events"&&c?` <span class="badge" title="Неподтверждённые обязательные">${c}</span>`:""}</button>`).join("");
   $("#nav").querySelectorAll("button").forEach(b=>b.onclick=()=>{V.view=b.dataset.v;render()});
   $("#brand").innerHTML=`Вклады<small id="sync" data-s="${SYNC.state}">${esc(SYNC.msg)}</small>`;
   const s=DEV;
@@ -385,7 +391,7 @@ function evItem(e,t0){
   const d=pd(e.date),must=e.cls==="must";
   let tags="";if(must){tags+=`<span class="tag m">обязательное</span>`;if(e.st.overdue)tags+=`<span class="tag w">просрочено на ${Math.round((pd(t0)-d)/864e5)} дн.</span>`;else if(!e.st.active)tags+=`<span class="tag">напомню с ${fd(addDays(monthStart(e.date),-2))}</span>`;if(e.st.snoozed)tags+=`<span class="tag">отложено до ${fd(e.st.snoozed)}</span>`}
   return`<li class="${must&&e.st.active?"must":""}"><div class="day"><b>${d.getUTCDate()}</b><span>${MON[d.getUTCMonth()]} ${d.getUTCFullYear()!==pd(t0).getUTCFullYear()?d.getUTCFullYear():""}</span></div>
-  <div class="ev"><div class="t">${esc(e.title)}${tags}</div><div class="s">${esc(e.sub||"")}${e.amount?` · <span class="amt">≈ ${money(e.amount)}</span>`:""}${e.p?` · <a href="#" onclick="A.card('${e.p.id}');return false">карточка</a>`:""}</div>${must||["chk","inc"].includes(e.kind)?`<div class="acts">${evActions(e)}</div>`:""}</div></li>`;
+  <div class="ev"><div class="t">${esc(e.title)}${tags}</div><div class="s">${esc(e.sub||"")}${e.amount?` · <span class="amt">≈ ${money(e.amount)}</span>`:""}${e.p&&!MOBILE?` · <a href="#" onclick="A.card('${e.p.id}');return false">карточка</a>`:""}</div>${!MOBILE&&(must||["chk","inc"].includes(e.kind))?`<div class="acts">${evActions(e)}</div>`:""}</div></li>`;
 }
 function notifToday(t0){
   const all=buildEvents(t0,14),t1=addDays(t0,1);
@@ -400,13 +406,13 @@ function notifToday(t0){
 function vEvents(){
   const t0=today(),L=buildEvents(t0);
   const emptyHint=!S.placements.length?`<div class="panel" style="margin-bottom:14px;border-color:var(--wait)"><b>Данных пока нет.</b> Если это первый вход — загрузите файл выгрузки из прототипа: <a href="#" onclick="V.view='settings';render();return false">Настройки → Загрузить из файла</a>.</div>`:"";
-  $("#main").innerHTML=`${emptyHint}<div class="grid2"><div><h1>Ближайшие события</h1><p class="lead">Обязательные — сверху, пока не отмечено, что сделано. Остальное на 60 дней вперёд.</p>
+  $("#main").innerHTML=`${emptyHint}<div class="grid2"><div><h1>Ближайшие события</h1><p class="lead">${MOBILE?"Только просмотр. Отмечать «сделано» — на Mac.":"Обязательные — сверху, пока не отмечено, что сделано. Остальное на 60 дней вперёд."}</p>
   <div class="panel" style="padding:4px 16px">${L.length?`<ul class="tl">${L.map(e=>evItem(e,t0)).join("")}</ul>`:`<div class="empty">На ближайшие 60 дней событий нет.</div>`}</div></div>
-  <aside style="display:flex;flex-direction:column;gap:14px;margin-top:8px">
+  ${MOBILE?"":`<aside style="display:flex;flex-direction:column;gap:14px;margin-top:8px">
   <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="A.newPlacement()">Добавить размещение</button><button class="btn" onclick="A.newEvent()">Добавить событие</button></div>
   <div class="panel"><h3>Второй канал: Календарь</h3><p class="muted" style="margin:0 0 8px;font-size:13px">Файл со всеми предстоящими обязательными событиями на 2 года, с напоминаниями за 7, 3 и 1 день в 09:00. Импортируйте его в отдельный календарь «Вклады».</p><button class="btn" id="icsbtn">Выгрузить в календарь (.ics)</button><div id="icsmsg" class="muted" style="font-size:13px;margin-top:6px"></div></div>
-  ${notifToday(t0)}</aside></div>`;
-  $("#icsbtn").onclick=exportIcs;
+  ${notifToday(t0)}</aside>`}</div>`;
+  if($("#icsbtn"))$("#icsbtn").onclick=exportIcs;
 }
 
 /* ========== календарь .ics ========== */
@@ -480,7 +486,26 @@ function vForecast(){
   $("#fy").onchange=e=>{V.fYear=e.target.value;render()};
 }
 /* ========== Settings view ========== */
+
+function initPushPanel(){(async()=>{const st=await pushStatus(),ios=/iPhone|iPad/.test(navigator.userAgent)&&!navigator.standalone&&!(window.matchMedia&&matchMedia("(display-mode: standalone)").matches);
+    const T={unsupported:ios?"На iPhone уведомления работают только после установки на экран «Домой»: «Поделиться» → «На экран Домой».":"Этот браузер не поддерживает push-уведомления.",denied:"Уведомления запрещены в настройках браузера для этого сайта. Разрешите их там и обновите страницу.",off:"Выключены. Включите, чтобы получать напоминания в 08:17 по Москве (если сервер задержится — до 12:17).",on:"Включены. Уведомления приходят утром, около 08:17 по Москве."};
+    $("#pst").textContent=T[st];const B=$("#pbtns");const msg=m=>{$("#pmsg").textContent=m};
+    let lvl=st==="on"?(await pushLevel().catch(()=>"all"))||"all":(MOBILE?"must":"all");
+    const radios=`<div style="flex-basis:100%;display:flex;flex-direction:column;gap:4px;margin-bottom:6px;font-size:14px"><label><input type="radio" name="plev" value="all" ${lvl==="all"?"checked":""}> Все уведомления: обязательные и утренняя сводка</label><label><input type="radio" name="plev" value="must" ${lvl==="must"?"checked":""}> Только обязательные (окончание вкладов, оферты, свои важные события)</label></div>`;
+    if(st==="off")B.innerHTML=radios+`<button class="btn primary" id="pon">Включить уведомления</button>`;
+    if(st==="on")B.innerHTML=radios+`<button class="btn" id="ptest">Проверить на этом устройстве</button><button class="btn" id="poff">Выключить</button>`;
+    const chosen=()=>{const r=B.querySelector('input[name="plev"]:checked');return r?r.value:"all"};
+    const run=f=>async()=>{msg("");try{await f();render()}catch(e){msg(e.message||String(e))}};
+    if($("#pon"))$("#pon").onclick=run(()=>pushEnable(chosen()));if($("#poff"))$("#poff").onclick=run(pushDisable);if($("#ptest"))$("#ptest").onclick=run(pushLocalTest);
+    if(st==="on")B.querySelectorAll('input[name="plev"]').forEach(r=>r.onchange=async()=>{msg("");try{await pushSetLevel(r.value);msg("Сохранено.")}catch(e){msg("Не удалось сохранить: "+(e.message||e))}})})()}
+function vSettingsMobile(){
+  $("#main").innerHTML=`<h1>Настройки</h1><p class="lead">На телефоне — только просмотр событий. Отмечать «сделано» и вносить вклады — на Mac.</p>
+  <div style="display:flex;flex-direction:column;gap:16px;max-width:560px">
+  <div class="panel"><h3>Уведомления на этом устройстве</h3><p id="pst" class="muted" style="margin:0 0 8px;font-size:13px">Проверяю…</p><div class="controls" style="margin:0" id="pbtns"></div><div id="pmsg" class="err"></div></div>
+  <div class="panel"><h3>Вход</h3><p style="margin:0 0 8px">Вы вошли как <b>${esc(SESS.user.email)}</b></p><button class="btn" id="lo">Выйти</button></div></div>`;
+  $("#lo").onclick=signOut;initPushPanel()}
 function vSettings(){
+  if(MOBILE)return vSettingsMobile();
   const s=S.settings,ks=[...s.keyRates].sort((a,b)=>a.from<b.from?-1:1);
   $("#main").innerHTML=`<h1>Настройки</h1><p class="lead">Данные хранятся на сервере и видны на всех ваших устройствах. Копия есть и на этом устройстве — для работы без сети.</p>
   <div class="grid2"><div style="display:flex;flex-direction:column;gap:16px">
@@ -501,13 +526,7 @@ function vSettings(){
   $("#usds").onclick=()=>{const v=parseFloat($("#usd").value);if(v>0){s.usdRate=v;save();render()}};
   $("#ut").onchange=e=>{DEV.useTestDate=e.target.checked;if(!DEV.testDate)DEV.testDate=realToday();saveDev();render()};
   $("#lo").onclick=signOut;
-  (async()=>{const st=await pushStatus(),ios=/iPhone|iPad/.test(navigator.userAgent)&&!navigator.standalone&&!matchMedia("(display-mode: standalone)").matches;
-    const T={unsupported:ios?"На iPhone уведомления работают только после установки на экран «Домой»: «Поделиться» → «На экран Домой».":"Этот браузер не поддерживает push-уведомления.",denied:"Уведомления запрещены в настройках браузера для этого сайта. Разрешите их там и обновите страницу.",off:"Выключены. Включите, чтобы получать обязательные напоминания и утреннюю сводку в 09:00 по Москве.",on:"Включены. Напоминания и утренняя сводка приходят в 09:00 по Москве."};
-    $("#pst").textContent=T[st];const B=$("#pbtns");const msg=m=>{$("#pmsg").textContent=m};
-    if(st==="off")B.innerHTML=`<button class="btn primary" id="pon">Включить уведомления</button>`;
-    if(st==="on")B.innerHTML=`<button class="btn" id="ptest">Проверить на этом устройстве</button><button class="btn" id="poff">Выключить</button>`;
-    const run=f=>async()=>{msg("");try{await f();vSettings()}catch(e){msg(e.message||String(e))}};
-    if($("#pon"))$("#pon").onclick=run(pushEnable);if($("#poff"))$("#poff").onclick=run(pushDisable);if($("#ptest"))$("#ptest").onclick=run(pushLocalTest)})();
+  initPushPanel();
   const setMsg=m=>{$("#dlmsg").textContent=m};
   $("#dl").onclick=()=>{const name="vklady-"+realToday()+".json";downloadFile(name,JSON.stringify(S,null,1),"application/json");setMsg("Файл "+name+" сохранён в «Загрузки».")};
   $("#ul").onclick=()=>$("#ulf").click();
